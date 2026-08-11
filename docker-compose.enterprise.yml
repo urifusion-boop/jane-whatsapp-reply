@@ -1,0 +1,201 @@
+version: '3.8'
+
+x-common-env: &common-env
+  MONGODB_URI: ${MONGODB_URI}
+  MONGODB_DB: ${MONGODB_DB}
+  REDIS_URL: redis://redis:6379/0
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
+  META_APP_ID: ${META_APP_ID}
+  META_APP_SECRET: ${META_APP_SECRET}
+  WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID}
+  WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN}
+  WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN}
+  FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY}
+  ESCALATION_EMAIL_TO: ${ESCALATION_EMAIL_TO}
+  ENVIRONMENT: production
+
+services:
+  # ===== REDIS (Local Container - Message Queue & Cache) =====
+  redis:
+    image: redis:7-alpine
+    container_name: jane-wa-redis
+    restart: always
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - jane-wa-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ===== LOAD BALANCER =====
+  nginx:
+    image: nginx:alpine
+    container_name: jane-wa-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    networks:
+      - jane-wa-network
+    depends_on:
+      - redis
+      - webhook-1
+      - webhook-2
+      - webhook-3
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ===== WEBHOOK SERVERS (3 instances for redundancy) =====
+  webhook-1:
+    image: uriteam/urisvc:jane-whatsapp-reply-prod
+    container_name: jane-wa-webhook-1
+    restart: always
+    expose:
+      - "8081"
+    environment:
+      <<: *common-env
+      PORT: 8081
+    networks:
+      - jane-wa-network
+    depends_on:
+      - redis
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8081 --workers 1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  webhook-2:
+    image: uriteam/urisvc:jane-whatsapp-reply-prod
+    container_name: jane-wa-webhook-2
+    restart: always
+    expose:
+      - "8082"
+    environment:
+      <<: *common-env
+      PORT: 8082
+    networks:
+      - jane-wa-network
+    depends_on:
+      - redis
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8082 --workers 1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  webhook-3:
+    image: uriteam/urisvc:jane-whatsapp-reply-prod
+    container_name: jane-wa-webhook-3
+    restart: always
+    expose:
+      - "8083"
+    environment:
+      <<: *common-env
+      PORT: 8083
+    networks:
+      - jane-wa-network
+    depends_on:
+      - redis
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8083 --workers 1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===== CELERY WORKERS (3 instances for parallel processing) =====
+  worker-1:
+    image: uriteam/urisvc:jane-whatsapp-reply-prod
+    container_name: jane-wa-worker-1
+    restart: always
+    environment:
+      <<: *common-env
+    networks:
+      - jane-wa-network
+    depends_on:
+      - redis
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q jane_wa_messages -n worker1@%h
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d worker1@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-2:
+    image: uriteam/urisvc:jane-whatsapp-reply-prod
+    container_name: jane-wa-worker-2
+    restart: always
+    environment:
+      <<: *common-env
+    networks:
+      - jane-wa-network
+    depends_on:
+      - redis
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q jane_wa_messages -n worker2@%h
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d worker2@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker-3:
+    image: uriteam/urisvc:jane-whatsapp-reply-prod
+    container_name: jane-wa-worker-3
+    restart: always
+    environment:
+      <<: *common-env
+    networks:
+      - jane-wa-network
+    depends_on:
+      - redis
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q jane_wa_messages -n worker3@%h
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d worker3@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===== FLOWER (Celery Monitoring Dashboard) =====
+  flower:
+    image: uriteam/urisvc:jane-whatsapp-reply-prod
+    container_name: jane-wa-flower
+    restart: always
+    ports:
+      - "5555:5555"
+    environment:
+      <<: *common-env
+      # Required — format "user:password". Flower's task list/detail views
+      # expose full task arguments with zero auth otherwise — the command
+      # below refuses to start rather than silently serving that
+      # unauthenticated if this is left unset, same discipline as
+      # whatsapp-agent's flower service.
+      FLOWER_BASIC_AUTH: ${FLOWER_BASIC_AUTH}
+    networks:
+      - jane-wa-network
+    depends_on:
+      - redis
+      - worker-1
+      - worker-2
+      - worker-3
+    command: sh -c 'celery -A app.celery_app flower --port=5555 --basic_auth=$${FLOWER_BASIC_AUTH:?FLOWER_BASIC_AUTH must be set in .env as user:password}'
+
+networks:
+  jane-wa-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+    driver: local
