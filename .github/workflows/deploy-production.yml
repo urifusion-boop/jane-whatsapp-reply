@@ -1,0 +1,106 @@
+name: Build and Deploy Jane on WhatsApp to Azure VM (PROD)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Same reasoning as whatsapp-agent's own workflow: without this, several quick
+# pushes queue several parallel runs against the same mutable image tag
+# (uriteam/urisvc:jane-whatsapp-reply-prod) — an older run can finish (and
+# push) after a newer run already pushed, silently leaving the VM running
+# stale code even though git HEAD looks current. cancel-in-progress is
+# deliberately false: the deploy job runs `docker compose down` then `up -d`
+# on the live VM — killing a run between those two steps would leave the
+# service down. Instead, let any in-flight run finish safely, and only the
+# single most-recently-queued run behind it survives (GitHub Actions drops
+# the others), so the final deploy always matches the latest push without
+# ever cutting off a deploy mid-flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python version
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t uriteam/urisvc:jane-whatsapp-reply-prod .
+          docker push uriteam/urisvc:jane-whatsapp-reply-prod
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy source files to VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.JANE_WA_VM_IP }}
+          username: ${{ secrets.JANE_WA_VM_USERNAME }}
+          key: ${{ secrets.JANE_WA_VM_SSH_KEY }}
+          source: "./app/,./docker-compose.enterprise.yml,./.env.example,./Dockerfile,./requirements.txt,./nginx.conf"
+          target: "~/jane-whatsapp-reply/"
+          strip_components: 0
+          rm: false
+
+      - name: SSH into VM and Deploy
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.JANE_WA_VM_IP }}
+          username: ${{ secrets.JANE_WA_VM_USERNAME }}
+          key: ${{ secrets.JANE_WA_VM_SSH_KEY }}
+          port: 22
+          timeout: 120s
+          command_timeout: 15m
+          script: |
+            if [ ! -d ~/jane-whatsapp-reply ]; then
+              mkdir -p ~/jane-whatsapp-reply;
+            fi
+            cd ~/jane-whatsapp-reply
+            echo '${{ secrets.DOCKER_PASSWORD }}' | docker login -u '${{ secrets.DOCKER_USERNAME }}' --password-stdin
+
+            # Pull latest image
+            docker pull uriteam/urisvc:jane-whatsapp-reply-prod
+
+            # Deploy enterprise architecture (nginx + 3 webhooks + 3 workers + flower)
+            docker compose -f docker-compose.enterprise.yml down
+            docker compose -f docker-compose.enterprise.yml up -d
+
+            # Cleanup
+            docker image prune -f
+
+            # Verify services are running
+            docker ps
+            echo "Waiting for services to be healthy..."
+            sleep 10
+            docker ps | grep jane-wa
