@@ -8,6 +8,16 @@ SAMPLE_FACTS = {
     "delivery_areas": [{"area": "Lekki", "fee": "₦1,500", "timeline": "1-2 days"}],
     "hours": "Mon-Sat 9am-6pm",
     "payment_methods": ["Bank transfer"],
+    "negotiation_policy": "Fixed price, no negotiation",
+    "returns_policy": "No returns on custom orders",
+}
+
+MULTI_ITEM_FACTS = {
+    "catalogue": [
+        {"name": "Starter plan", "price": "₦15,000/month"},
+        {"name": "Pro plan", "price": "₦40,000/month"},
+        {"name": "7-day free trial", "price": "Free"},
+    ],
 }
 
 
@@ -67,6 +77,65 @@ def test_never_invents_a_price_not_in_catalogue(mock_facts):
     result = _run(reply_engine.handle("how much is the rose candle?"))
 
     assert result.matched is False
+
+
+@patch("app.services.reply_engine.get_uri_operational_facts", new_callable=AsyncMock)
+@patch("app.services.reply_engine._openai_client")
+def test_payment_methods_match_answers_directly(mock_client, mock_facts):
+    mock_facts.return_value = SAMPLE_FACTS
+    mock_client.return_value.chat.completions.create.return_value = _mock_openai_response(
+        "We accept bank transfer."
+    )
+    result = _run(reply_engine.handle("what payment methods do you accept?"))
+    assert result.matched is True
+    assert result.matched_fact == "payment_methods"
+
+
+@patch("app.services.reply_engine.get_uri_operational_facts", new_callable=AsyncMock)
+@patch("app.services.reply_engine._openai_client")
+def test_negotiation_policy_match_answers_directly(mock_client, mock_facts):
+    mock_facts.return_value = SAMPLE_FACTS
+    mock_client.return_value.chat.completions.create.return_value = _mock_openai_response(
+        "Sorry, prices are fixed."
+    )
+    result = _run(reply_engine.handle("can I get a discount?"))
+    assert result.matched is True
+    assert result.matched_fact == "negotiation_policy"
+
+
+@patch("app.services.reply_engine.get_uri_operational_facts", new_callable=AsyncMock)
+@patch("app.services.reply_engine._openai_client")
+def test_returns_policy_match_answers_directly(mock_client, mock_facts):
+    mock_facts.return_value = SAMPLE_FACTS
+    mock_client.return_value.chat.completions.create.return_value = _mock_openai_response(
+        "No returns on custom orders."
+    )
+    result = _run(reply_engine.handle("what's your refund policy?"))
+    assert result.matched is True
+    assert result.matched_fact == "returns_policy"
+
+
+@patch("app.services.reply_engine.get_uri_operational_facts", new_callable=AsyncMock)
+def test_similarly_named_items_never_cross_match(mock_facts):
+    # "Starter plan" and "Pro plan" share the word "plan" (filtered as a stopword)
+    # but nothing else — a question about one must never answer with the other's
+    # price. This is the exact shape of bug this AND-based word matching exists to
+    # prevent (a shared generic word must never be sufficient on its own).
+    mock_facts.return_value = MULTI_ITEM_FACTS
+    result = _run(reply_engine.handle("how much for pro?"))
+    assert result.matched is True
+    assert result.matched_fact == "catalogue"
+
+
+@patch("app.services.reply_engine.get_uri_operational_facts", new_callable=AsyncMock)
+def test_numeric_token_in_name_not_required_to_match(mock_facts):
+    # "7-day free trial" must still answer "do you offer a free trial?" even
+    # though "7-day" never appears in the question — the numeric/date-like token
+    # is deliberately excluded from the required-word set (see _significant_words).
+    mock_facts.return_value = MULTI_ITEM_FACTS
+    result = _run(reply_engine.handle("do you offer a free trial?"))
+    assert result.matched is True
+    assert result.matched_fact == "catalogue"
 
 
 @patch("app.services.reply_engine.get_uri_operational_facts", new_callable=AsyncMock)

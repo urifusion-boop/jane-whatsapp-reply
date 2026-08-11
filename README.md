@@ -48,9 +48,28 @@ celery -A app.celery_app worker --loglevel=info -Q jane_wa_messages
 pytest tests/ -v
 ```
 
-18 tests, all against mocks (OpenAI, Mongo, Meta's HTTP API) — no live Meta
+23 tests, all against mocks (OpenAI, Mongo, Meta's HTTP API) — no live Meta
 credentials are required to run them. See "Not yet live-tested" below for what
 those credentials would additionally unlock.
+
+**Also verified against real data, not just mocks**: URI Social's actual
+`operational_facts` (real Starter/Growth/Pro/Agency pricing, Squad as the payment
+gateway, the real 7-day/10-credit trial — all cross-checked against
+`SubscriptionService.py`/`TrialService.py`/`PaymentService.py` in `uri-social-backend`,
+not marketing copy, which was found to disagree with the code in two places and has
+since been corrected) is live in the dev MongoDB at `URI_BRAND_ID=
+brnd_personal_uri-social-own-profile`. Running `reply_engine.handle()` against it for
+9 real customer-style questions ("how much is the growth plan?", "do you offer a free
+trial?", "what payment methods do you accept?", "can I get a discount?", "what are
+your delivery areas?", "refund policy?", "how much for pro?", "agency plan?", "can I
+top up credits?") answered 8 of 9 correctly from real facts and correctly escalated
+the one with no matching data (URI has no delivery areas — nothing to invent). This
+run is also what surfaced and got a real fix: the matcher originally had no logic at
+all for payment_methods/negotiation_policy/returns_policy (only catalogue/hours/
+delivery), and a naive single-word matcher would have let two catalogue items
+sharing a generic word cross-match each other's price — both are now covered by
+tests (`test_similarly_named_items_never_cross_match`,
+`test_payment_methods_match_answers_directly`, etc.).
 
 ## Deploying
 
@@ -72,12 +91,11 @@ full test suite, and `docker compose config` validation. No secrets required.
 ## Not yet live-tested — blocked on Day-1 setup, not engineering
 
 This service's own logic (signature verification, fact matching, conversation state
-machine, encryption) is fully built and unit-tested. What it cannot do yet, because
-none of the following exist:
+machine, encryption) is fully built and unit-tested, and the fact-matching/reply
+logic has additionally been run against URI's real operational facts in the dev
+database (see above) — that part is done. What's still missing before this can
+handle a real WhatsApp message end-to-end:
 
-- **URI's own `operational_facts`** — nothing has been filled in for URI itself via
-  the Playbook yet, so there's nothing real to answer from.
-- **`URI_BRAND_ID`** — needs to point at wherever that profile ends up living.
 - **WhatsApp product on the Meta App** — `META_APP_ID`/`META_APP_SECRET` are reused
   from `uri-social-backend`'s existing Meta App; the WhatsApp Business Platform
   product itself hasn't been added to it yet.

@@ -35,15 +35,45 @@ class ReplyResult:
     matched_fact: str = ""
 
 
+_STOPWORDS = {"a", "an", "the", "and", "or", "of", "for", "to", "plan", "package"}
+
+
+def _significant_words(name: str) -> List[str]:
+    """Words worth matching on — drops short/common words like "plan" or "the",
+    and drops any word containing a digit (e.g. "7-day"): those read as technical/
+    date-like details a customer's casual phrasing rarely repeats verbatim, so
+    requiring them would make an otherwise-answerable question (e.g. "do you offer
+    a free trial?" against a "7-day free trial" item) escalate for no good reason."""
+    return [w for w in name.lower().split() if len(w) >= 3 and w not in _STOPWORDS and not any(c.isdigit() for c in w)]
+
+
+def _catalogue_item_matches(name: str, q: str) -> bool:
+    """True if the full item name appears verbatim, OR every one of its
+    significant words appears somewhere in the question (AND, not OR). AND is the
+    safety-critical choice: a single shared category noun like "candle" must never
+    be enough on its own to match "Lavender candle" against a question about some
+    other, non-catalogue "candle" — confirmed as a real regression by
+    test_never_invents_a_price_not_in_catalogue when this was OR-based. An item
+    whose name reduces to exactly one significant word (e.g. "Pro" once "plan" is
+    filtered) still matches on that single word — there's nothing else to combine
+    it with, and it's the item's whole identity, not a shared category label."""
+    if name.lower() in q:
+        return True
+    words = _significant_words(name)
+    return bool(words) and all(w in q for w in words)
+
+
 def _find_match(question: str, facts: Dict[str, Any]) -> Optional[Dict[str, str]]:
-    """Case-insensitive substring match against catalogue item names, hours, and
-    delivery area names — deliberately simple and conservative, not fuzzy/semantic.
-    Returns the single best match, or None."""
+    """Case-insensitive matching against every operational_facts category —
+    deliberately simple and conservative, not fuzzy/semantic: see
+    _catalogue_item_matches for the catalogue rule; hours/payment/negotiation/
+    returns match on a small fixed keyword set each. Returns the single best
+    match, or None — never guesses when nothing lines up."""
     q = question.lower()
 
     for item in facts.get("catalogue") or []:
         name = str(item.get("name", ""))
-        if name and name.lower() in q:
+        if name and _catalogue_item_matches(name, q):
             return {"kind": "catalogue", "name": name, "price": item.get("price", ""), "description": item.get("description", ""), "availability": item.get("availability", "")}
 
     if facts.get("hours") and any(kw in q for kw in ("hour", "open", "close", "time")):
@@ -53,6 +83,21 @@ def _find_match(question: str, facts: Dict[str, Any]) -> Optional[Dict[str, str]
         area_name = str(area.get("area", ""))
         if area_name and area_name.lower() in q:
             return {"kind": "delivery", "area": area_name, "fee": area.get("fee", ""), "timeline": area.get("timeline", "")}
+
+    if facts.get("payment_methods") and any(
+        kw in q for kw in ("payment", "pay ", "how do i pay", "how can i pay", "accept")
+    ):
+        return {"kind": "payment_methods", "payment_methods": ", ".join(facts["payment_methods"])}
+
+    if facts.get("negotiation_policy") and any(
+        kw in q for kw in ("discount", "negotiat", "lower price", "reduce price", "cheaper", "best price")
+    ):
+        return {"kind": "negotiation_policy", "negotiation_policy": facts["negotiation_policy"]}
+
+    if facts.get("returns_policy") and any(
+        kw in q for kw in ("refund", "return", "money back", "cancel")
+    ):
+        return {"kind": "returns_policy", "returns_policy": facts["returns_policy"]}
 
     return None
 
@@ -69,8 +114,14 @@ def _phrase_fact(question: str, match: Dict[str, str]) -> str:
             fact_line += f" ({match['availability']})"
     elif match["kind"] == "hours":
         fact_line = f"Business hours: {match['hours']}"
-    else:
+    elif match["kind"] == "delivery":
         fact_line = f"Delivery to {match['area']}: fee {match.get('fee') or 'not listed'}, timeline {match.get('timeline') or 'not listed'}"
+    elif match["kind"] == "payment_methods":
+        fact_line = f"Accepted payment methods: {match['payment_methods']}"
+    elif match["kind"] == "negotiation_policy":
+        fact_line = f"Pricing/negotiation policy: {match['negotiation_policy']}"
+    else:
+        fact_line = f"Returns/refund policy: {match['returns_policy']}"
 
     try:
         result = _openai_client().chat.completions.create(
