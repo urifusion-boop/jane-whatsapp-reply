@@ -7,7 +7,20 @@ from celery.signals import worker_process_init
 
 from app.core.config import settings
 
-celery_app = Celery("jane_whatsapp_reply", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
+celery_app = Celery(
+    "jane_whatsapp_reply",
+    broker=settings.REDIS_URL,
+    backend=settings.REDIS_URL,
+    # Without this, `celery -A app.celery_app worker` never imports
+    # app.tasks.message_processor, so @celery_app.task never runs and the
+    # worker's task registry stays empty — confirmed live: worker startup
+    # logs showed an empty [tasks] section, meaning a real enqueued message
+    # would have been rejected as "unregistered task" and silently dropped.
+    # webhook_router.py's lazy import of the task only registers it in the
+    # webhook process (which just needs the task NAME to enqueue), not in
+    # the worker process that actually has to execute it.
+    include=["app.tasks.message_processor"],
+)
 
 celery_app.conf.update(
     task_serializer="json",
