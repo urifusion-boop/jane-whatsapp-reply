@@ -20,19 +20,17 @@ from app.core.config import settings
 _CACHE_TTL_SECONDS = 60
 _cache: Dict[str, Any] = {"facts": None, "brand_name": "", "fetched_at": 0.0}
 
-_client: Optional[AsyncIOMotorClient] = None
-
-
-def _get_client() -> AsyncIOMotorClient:
-    global _client
-    if _client is None:
-        _client = AsyncIOMotorClient(settings.MONGODB_URI)
-    return _client
-
 
 async def get_uri_operational_facts() -> Dict[str, Any]:
     """URI's own operational_facts, keyed by brand_name — cached briefly since this
-    data changes rarely and there's no reason to hit Mongo on every inbound message."""
+    data changes rarely and there's no reason to hit Mongo on every inbound message.
+
+    On a cache miss, the Motor client is created fresh and closed within this same
+    call rather than cached at module level — each Celery task runs its own
+    `asyncio.run()` with a brand-new event loop, and a Motor client created in one
+    task's loop raises "Event loop is closed" the moment a later task (running in
+    a different loop) tries to use it. message_processor.py already follows this
+    same create-fresh-per-task pattern for its own Mongo client."""
     now = time.monotonic()
     if _cache["facts"] is not None and (now - _cache["fetched_at"]) < _CACHE_TTL_SECONDS:
         return _cache["facts"]
@@ -45,10 +43,15 @@ async def get_uri_operational_facts() -> Dict[str, Any]:
             "anything."
         )
 
-    db = _get_client()[settings.MONGODB_DB]
-    profile = await db["brand_profiles"].find_one(
-        {"$or": [{"brand_id": settings.URI_BRAND_ID}, {"user_id": settings.URI_BRAND_ID}]}
-    )
+    client = AsyncIOMotorClient(settings.MONGODB_URI)
+    try:
+        db = client[settings.MONGODB_DB]
+        profile = await db["brand_profiles"].find_one(
+            {"$or": [{"brand_id": settings.URI_BRAND_ID}, {"user_id": settings.URI_BRAND_ID}]}
+        )
+    finally:
+        client.close()
+
     facts = (profile or {}).get("operational_facts") or {}
     brand_name = (profile or {}).get("brand_name", "URI Social")
 
