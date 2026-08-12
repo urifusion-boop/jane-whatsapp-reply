@@ -3,6 +3,7 @@ version: '3.8'
 x-common-env: &common-env
   MONGODB_URI: ${MONGODB_URI}
   MONGODB_DB: ${MONGODB_DB}
+  URI_BRAND_ID: ${URI_BRAND_ID}
   REDIS_URL: redis://redis:6379/0
   OPENAI_API_KEY: ${OPENAI_API_KEY}
   META_APP_ID: ${META_APP_ID}
