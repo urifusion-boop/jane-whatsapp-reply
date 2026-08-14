@@ -55,6 +55,13 @@ def _init_worker_process(**kwargs):
         # index just cleans up old claims so the collection doesn't grow forever.
         await db["jane_wa_processed_messages"].create_index("message_id", unique=True)
         await db["jane_wa_processed_messages"].create_index("created_at", expireAfterSeconds=86400)
+        # Multi-tenant conversation scoping: without brand_id in the key, two
+        # different clients' customers could collide onto one conversation
+        # record now that this service handles more than one client's WhatsApp
+        # number. Safe to create before every existing doc has brand_id
+        # backfilled — phone_hash alone was already unique pre-migration, so
+        # there's nothing for the compound key to conflict on either way.
+        await db["jane_wa_conversations"].create_index([("phone_hash", 1), ("brand_id", 1)], unique=True)
         client.close()
 
     try:

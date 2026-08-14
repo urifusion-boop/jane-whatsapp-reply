@@ -13,7 +13,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.celery_app import celery_app
 from app.core.config import settings
-from app.services import conversation_service, reply_engine
+from app.services import client_registry, conversation_service, reply_engine
 from app.services.cloud_api_client import extract_inbound_message, send_message
 from app.services.crypto_utils import encrypt_body
 from app.services.escalation_notifier import notify_escalation
@@ -35,6 +35,24 @@ async def _process_message_async(payload: Dict[str, Any]) -> None:
     if message is None:
         return  # not a text message we handle (status update, media, etc.)
 
+    client_doc = await client_registry.get_client_by_phone_number_id(message["phone_number_id"])
+    if client_doc is not None:
+        brand_id = client_doc.get("brand_id") or client_doc.get("user_id")
+        escalation_email = client_doc.get("escalation_email")
+    elif message["phone_number_id"] == settings.WHATSAPP_PHONE_NUMBER_ID and settings.URI_BRAND_ID:
+        # Transition fallback (Phase 3 migration): URI's own rehearsal number
+        # hasn't been backfilled into social_connections yet — fall back to the
+        # old single-tenant settings rather than dropping the message. Once the
+        # migration doc exists, get_client_by_phone_number_id resolves it and
+        # this branch stops firing (self-verifying: check the logs use the
+        # registry path, not this one).
+        brand_id = settings.URI_BRAND_ID
+        escalation_email = settings.ESCALATION_EMAIL_TO
+        print(f"[message_processor] using transition fallback for phone_number_id={message['phone_number_id']} — social_connections doc not found yet")
+    else:
+        print(f"[message_processor] no active whatsapp_business connection for phone_number_id={message['phone_number_id']} — dropping")
+        return
+
     client = AsyncIOMotorClient(settings.MONGODB_URI)
     db = client[settings.MONGODB_DB]
 
@@ -48,7 +66,7 @@ async def _process_message_async(payload: Dict[str, Any]) -> None:
         except DuplicateKeyError:
             return  # already processed — Meta redelivered the same webhook event
 
-        conversation = await conversation_service.get_or_create_conversation(db, message["from"])
+        conversation = await conversation_service.get_or_create_conversation(db, message["from"], brand_id)
         await conversation_service.touch(db, conversation["_id"])
 
         await db[MESSAGES_COLLECTION].insert_one(
@@ -66,10 +84,10 @@ async def _process_message_async(payload: Dict[str, Any]) -> None:
             # resolved — never resumes mid-exchange without the customer noticing.
             return
 
-        result = await reply_engine.handle(message["text"])
+        result = await reply_engine.handle(message["text"], brand_id)
 
         if result.matched:
-            await send_message(message["from"], result.reply_text)
+            await send_message(message["from"], result.reply_text, message["phone_number_id"])
             await db[MESSAGES_COLLECTION].insert_one(
                 {
                     "conversation_id": conversation["_id"],
@@ -80,7 +98,7 @@ async def _process_message_async(payload: Dict[str, Any]) -> None:
                 }
             )
         else:
-            await send_message(message["from"], reply_engine.HOLDING_REPLY)
+            await send_message(message["from"], reply_engine.HOLDING_REPLY, message["phone_number_id"])
             await db[MESSAGES_COLLECTION].insert_one(
                 {
                     "conversation_id": conversation["_id"],
@@ -92,7 +110,7 @@ async def _process_message_async(payload: Dict[str, Any]) -> None:
             )
             reason = "No exact match in operational_facts for this question."
             await conversation_service.escalate(db, conversation["_id"], reason)
-            await notify_escalation(str(conversation["_id"]), message["text"], reason)
+            await notify_escalation(str(conversation["_id"]), message["text"], reason, escalation_email)
     except Exception:
         if claimed:
             # Release the claim so a retry actually re-processes this message

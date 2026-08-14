@@ -18,11 +18,11 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from app.core.config import settings
 
 _CACHE_TTL_SECONDS = 60
-_cache: Dict[str, Any] = {"facts": None, "brand_name": "", "fetched_at": 0.0}
+_cache: Dict[str, Dict[str, Any]] = {}  # brand_id -> {"facts": ..., "brand_name": ..., "fetched_at": ...}
 
 
-async def get_uri_operational_facts() -> Dict[str, Any]:
-    """URI's own operational_facts, keyed by brand_name — cached briefly since this
+async def get_operational_facts_for_brand(brand_id: str) -> Dict[str, Any]:
+    """A given brand's operational_facts — cached briefly per brand_id since this
     data changes rarely and there's no reason to hit Mongo on every inbound message.
 
     On a cache miss, the Motor client is created fresh and closed within this same
@@ -32,22 +32,22 @@ async def get_uri_operational_facts() -> Dict[str, Any]:
     a different loop) tries to use it. message_processor.py already follows this
     same create-fresh-per-task pattern for its own Mongo client."""
     now = time.monotonic()
-    if _cache["facts"] is not None and (now - _cache["fetched_at"]) < _CACHE_TTL_SECONDS:
-        return _cache["facts"]
+    cached = _cache.get(brand_id)
+    if cached is not None and (now - cached["fetched_at"]) < _CACHE_TTL_SECONDS:
+        return cached["facts"]
 
-    if not settings.URI_BRAND_ID:
+    if not brand_id:
         raise RuntimeError(
-            "URI_BRAND_ID is not set — this must point at the brand_id (or user_id, "
-            "for a personal-brand profile) of URI's own brand_profiles document, "
-            "filled in via the Playbook (Slice 1), before this service can answer "
-            "anything."
+            "brand_id is not set — this must be the brand_id (or user_id, for a "
+            "personal-brand profile) resolved from the inbound WhatsApp number's "
+            "client_registry connection, before this service can answer anything."
         )
 
     client = AsyncIOMotorClient(settings.MONGODB_URI)
     try:
         db = client[settings.MONGODB_DB]
         profile = await db["brand_profiles"].find_one(
-            {"$or": [{"brand_id": settings.URI_BRAND_ID}, {"user_id": settings.URI_BRAND_ID}]}
+            {"$or": [{"brand_id": brand_id}, {"user_id": brand_id}]}
         )
     finally:
         client.close()
@@ -55,9 +55,7 @@ async def get_uri_operational_facts() -> Dict[str, Any]:
     facts = (profile or {}).get("operational_facts") or {}
     brand_name = (profile or {}).get("brand_name", "URI Social")
 
-    _cache["facts"] = facts
-    _cache["brand_name"] = brand_name
-    _cache["fetched_at"] = now
+    _cache[brand_id] = {"facts": facts, "brand_name": brand_name, "fetched_at": now}
     return facts
 
 

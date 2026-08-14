@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from openai import OpenAI
 
 from app.core.config import settings
-from app.services.brand_facts_reader import get_uri_operational_facts
+from app.services.brand_facts_reader import get_operational_facts_for_brand
 
 _client: Optional[OpenAI] = None
 
@@ -147,8 +147,8 @@ def _phrase_fact(question: str, match: Dict[str, str]) -> str:
         return fact_line
 
 
-async def handle(question: str) -> ReplyResult:
-    facts = await get_uri_operational_facts()
+async def handle(question: str, brand_id: str) -> ReplyResult:
+    facts = await get_operational_facts_for_brand(brand_id)
     match = _find_match(question, facts)
     if match is None:
         return ReplyResult(matched=False, reply_text="")

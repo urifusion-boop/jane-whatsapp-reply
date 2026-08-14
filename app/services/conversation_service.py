@@ -22,15 +22,19 @@ class ConversationState(str, Enum):
     CLOSED = "closed"
 
 
-async def get_or_create_conversation(db: AsyncIOMotorDatabase, raw_phone: str) -> Dict[str, Any]:
+async def get_or_create_conversation(db: AsyncIOMotorDatabase, raw_phone: str, brand_id: str) -> Dict[str, Any]:
+    """Scoped by (phone_hash, brand_id), not phone_hash alone — without brand_id,
+    two different clients' customers could collide onto the same conversation
+    record now that this service handles more than one client's WhatsApp number."""
     phone_hash = hash_phone(raw_phone)
-    existing = await db[COLLECTION].find_one({"phone_hash": phone_hash})
+    existing = await db[COLLECTION].find_one({"phone_hash": phone_hash, "brand_id": brand_id})
     if existing:
         return existing
 
     now = time.time()
     doc = {
         "phone_hash": phone_hash,
+        "brand_id": brand_id,
         "state": ConversationState.JANE_HANDLING.value,
         "escalated_reason": None,
         "escalated_at": None,
