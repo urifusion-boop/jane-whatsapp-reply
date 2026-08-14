@@ -33,18 +33,24 @@ def verify_meta_signature(raw_body: bytes, signature_header: str, app_secret: st
     return hmac.compare_digest(expected, provided)
 
 
-async def send_message(to: str, body: str, phone_number_id: str) -> Dict[str, Any]:
+async def send_message(to: str, body: str, phone_number_id: str, access_token: Optional[str] = None) -> Dict[str, Any]:
     """Send a plain text WhatsApp message via Cloud API. `to` is the customer's raw
     phone number in international format, no '+' — Cloud API's own convention.
     `phone_number_id` is the SENDING number — resolved per-client from the inbound
     webhook's own metadata.phone_number_id, not a single global setting, since this
-    service now serves more than one client's WhatsApp number. WHATSAPP_ACCESS_TOKEN
-    stays global: Meta authorizes Graph API calls by asset-grant (which WABAs this
-    System User has been given access to), not by per-client token issuance, so the
-    one token here covers every onboarded client's number."""
+    service now serves more than one client's WhatsApp number.
+
+    `access_token` defaults to the global WHATSAPP_ACCESS_TOKEN (URI's own
+    rehearsal number, set up by hand as a System User asset-grant). CORRECTION to
+    an earlier assumption: real clients onboarded via Embedded Signup do NOT share
+    that asset-grant model — confirmed live in Meta's App Dashboard that the only
+    available "full access" configuration template issues each client their own
+    60-day-expiry token, kept alive by uri-social-backend's
+    run_whatsapp_token_refresh cron job and resolved here via client_registry's
+    stored access_token, per call — not a single shared token for every client."""
     url = f"{GRAPH_BASE}/{phone_number_id}/messages"
     headers = {
-        "Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {access_token or settings.WHATSAPP_ACCESS_TOKEN}",
         "Content-Type": "application/json",
     }
     payload = {

@@ -39,6 +39,14 @@ async def _process_message_async(payload: Dict[str, Any]) -> None:
     if client_doc is not None:
         brand_id = client_doc.get("brand_id") or client_doc.get("user_id")
         escalation_email = client_doc.get("escalation_email")
+        # None for URI's own manually-configured rehearsal connection (no
+        # per-client token stored — it uses the shared System User grant) or any
+        # connection predating this field; real clients onboarded via Embedded
+        # Signup have their own 60-day token here, kept alive by
+        # uri-social-backend's run_whatsapp_token_refresh cron job.
+        # send_message() falls back to the global WHATSAPP_ACCESS_TOKEN when this
+        # is None.
+        access_token = client_doc.get("access_token")
     elif message["phone_number_id"] == settings.WHATSAPP_PHONE_NUMBER_ID and settings.URI_BRAND_ID:
         # Transition fallback (Phase 3 migration): URI's own rehearsal number
         # hasn't been backfilled into social_connections yet — fall back to the
@@ -48,6 +56,7 @@ async def _process_message_async(payload: Dict[str, Any]) -> None:
         # registry path, not this one).
         brand_id = settings.URI_BRAND_ID
         escalation_email = settings.ESCALATION_EMAIL_TO
+        access_token = None
         print(f"[message_processor] using transition fallback for phone_number_id={message['phone_number_id']} — social_connections doc not found yet")
     else:
         print(f"[message_processor] no active whatsapp_business connection for phone_number_id={message['phone_number_id']} — dropping")
@@ -87,7 +96,7 @@ async def _process_message_async(payload: Dict[str, Any]) -> None:
         result = await reply_engine.handle(message["text"], brand_id)
 
         if result.matched:
-            await send_message(message["from"], result.reply_text, message["phone_number_id"])
+            await send_message(message["from"], result.reply_text, message["phone_number_id"], access_token)
             await db[MESSAGES_COLLECTION].insert_one(
                 {
                     "conversation_id": conversation["_id"],
@@ -98,7 +107,7 @@ async def _process_message_async(payload: Dict[str, Any]) -> None:
                 }
             )
         else:
-            await send_message(message["from"], reply_engine.HOLDING_REPLY, message["phone_number_id"])
+            await send_message(message["from"], reply_engine.HOLDING_REPLY, message["phone_number_id"], access_token)
             await db[MESSAGES_COLLECTION].insert_one(
                 {
                     "conversation_id": conversation["_id"],
