@@ -1,13 +1,11 @@
-# Use Python 3.13 slim image
-FROM python:3.13-slim
+# Stage 1: Build
+FROM python:3.13-slim AS build
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install build-time system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -19,6 +17,21 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy application code
 COPY ./app /app/app
+
+# Stage 2: Production
+FROM python:3.13-slim AS production
+
+WORKDIR /app
+
+# curl is needed at runtime for the docker-compose healthchecks
+# (curl -f http://localhost:<port>/health); gcc from the build stage
+# never makes it into this image
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /usr/local /usr/local
+COPY --from=build /app/app /app/app
 
 # Expose port
 EXPOSE 8080
