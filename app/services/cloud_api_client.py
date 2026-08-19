@@ -91,3 +91,29 @@ def extract_inbound_message(payload: Dict[str, Any]) -> Optional[Dict[str, str]]
         }
     except (IndexError, AttributeError, TypeError):
         return None
+
+
+def extract_message_echo(payload: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """STUB — not yet implemented. Meta's Cloud API can notify a webhook when a human
+    sends a message from the WhatsApp Business phone app on a Coexistence-enabled
+    number (this is what lets a customer-care agent reply to an escalated customer
+    directly from their phone and have Jane's side of the system know about it,
+    instead of Jane staying silently unaware). This is NOT the same payload shape as
+    extract_inbound_message's value.messages — Meta's documented field for this is
+    typically value.message_echoes, but that has NOT been verified against Meta's
+    current live docs or a real captured payload from this org's own Coexistence
+    setup (Coexistence isn't enabled yet as of writing this).
+
+    Deliberately returns None unconditionally until that verification happens —
+    guessing the schema into production code risks silently mis-parsing (or
+    silently never matching) real echo events with no test coverage that means
+    anything. See message_processor.py's dispatch: this sits as a second check
+    after extract_inbound_message() returns None, so wiring it up for real is a
+    small, isolated change once the schema is confirmed — it does not require
+    touching the dispatch logic itself, just this function's body.
+
+    TODO(before enabling Coexistence in production): pull Meta's current Cloud API
+    Coexistence/message-echo webhook docs, or enable Coexistence on a test number
+    first and capture one real payload, then implement this for real and add a
+    corresponding fixture-based test."""
+    return None

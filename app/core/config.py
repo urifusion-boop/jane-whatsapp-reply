@@ -36,6 +36,20 @@ class Settings(BaseSettings):
     # Field-level encryption (Fernet) for message bodies at rest
     FIELD_ENCRYPTION_KEY: str = ""
 
+    # Separate Fernet key for the customer's raw phone number specifically —
+    # deliberately NOT the same key as FIELD_ENCRYPTION_KEY. Phone numbers were
+    # originally stored only as a one-way hash (see crypto_utils.py); replying to
+    # an escalated conversation later requires the real number (Meta's send API
+    # always needs the literal `to` number), so it's now stored reversibly, once,
+    # on the conversation doc — but on its own key so compromising the message-body
+    # key never exposes customer identities, and vice versa. Decrypt access is
+    # narrowed in code to exactly two call sites (message_processor.py,
+    # agent_reply_service.py) — never returned by a list/read API, never logged.
+    # Paired with a retention job (app/scripts/purge_stale_phone_numbers.py) that
+    # clears this field once a conversation is closed and past its reply window,
+    # so it isn't kept decryptable indefinitely.
+    PHONE_ENCRYPTION_KEY: str = ""
+
     # Escalation notification (email — see plan's "Decisions made" for why email,
     # not WhatsApp, is the v1 channel for URI's own rehearsal specifically)
     ESCALATION_EMAIL_TO: str = ""
@@ -44,6 +58,22 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
     SMTP_FROM: str = ""
+
+    # uri-social-frontend's own origin, for the escalation email's click-through
+    # deep link — jane can't reach uri-social-backend's WEB_APP_URL setting, needs
+    # its own copy.
+    FRONTEND_BASE_URL: str = ""
+
+    # Shared secret gating /internal/* — presented by uri-social-backend as
+    # X-Internal-Service (see app/middleware/internal_auth.py). Mirrors
+    # uri-social-backend's own SDK_GATEWAY_INTERNAL_SECRET pattern: left empty by
+    # default so an unconfigured deployment fails closed (an empty header value
+    # can never match an empty expected secret), rather than trusting a guessable
+    # default. /internal/ is reachable over the public internet (confirmed via
+    # nginx.conf — it shares the same public HTTPS server block as /webhook, just
+    # a different rate-limit zone), so this secret is the real access gate, not a
+    # network boundary.
+    JANE_WA_INTERNAL_SECRET: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

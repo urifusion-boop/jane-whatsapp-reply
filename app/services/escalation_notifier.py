@@ -34,7 +34,8 @@ async def notify_escalation(conversation_id: str, question: str, reason: str, es
     message["From"] = settings.SMTP_FROM or settings.SMTP_USER
     message["To"] = escalation_email
     message["Subject"] = "Jane on WhatsApp — a customer question needs your input"
-    message.set_content(
+
+    body = (
         f"A customer asked something Jane couldn't answer from the current "
         f"operational facts:\n\n"
         f'  "{question}"\n\n'
@@ -43,6 +44,17 @@ async def notify_escalation(conversation_id: str, question: str, reason: str, es
         f"Jane has sent a holding reply and will stay quiet on this conversation "
         f"until it's resolved."
     )
+    if settings.FRONTEND_BASE_URL:
+        # Deep link to the dashboard's Escalations tab, landing on this specific
+        # conversation. Requires the recipient's own login (real customer-care
+        # team accounts, not a bespoke signed/expiring token) — deliberate choice:
+        # a token would grant reply access to anyone who has the email (forwarded,
+        # leaked) without the recipient's own credentials, and would blur exactly
+        # which team member replied. The ?tab= query-param pattern is already used
+        # elsewhere in the dashboard for direct-linking a tab.
+        link = f"{settings.FRONTEND_BASE_URL}/workspace/?tab=escalations&conversation={conversation_id}"
+        body += f"\n\nReply from the dashboard: {link}"
+    message.set_content(body)
 
     await aiosmtplib.send(
         message,

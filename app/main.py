@@ -1,42 +1,43 @@
-from bson import ObjectId
-from bson.errors import InvalidId
-from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.core.config import settings
-from app.routers import webhook_router
-from app.services import conversation_service
+from app.routers import internal_router, webhook_router
+from app.services.db_indexes import ensure_indexes
 
-app = FastAPI(title="Jane on WhatsApp — reply engine (URI's own number)")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # jane_wa_agent_reply_claims and jane_wa_messages' history index are written/
+    # read by THIS process (internal_router.py), not by a Celery task — relying
+    # solely on celery_app.py's worker-startup hook would leave them uncreated in
+    # a deployment where a webhook replica starts without a worker having run
+    # first (they're separate containers — see docker-compose.enterprise.yml).
+    if settings.MONGODB_URI:
+        client = AsyncIOMotorClient(settings.MONGODB_URI)
+        try:
+            await ensure_indexes(client[settings.MONGODB_DB])
+        except Exception as e:
+            print(f"[main] failed to ensure indexes: {e}")
+        finally:
+            client.close()
+    yield
+
+
+app = FastAPI(title="Jane on WhatsApp — reply engine (URI's own number)", lifespan=lifespan)
 
 app.include_router(webhook_router.router)
-
-_client = AsyncIOMotorClient(settings.MONGODB_URI) if settings.MONGODB_URI else None
+# All /internal/* endpoints require X-Internal-Service (shared secret) +
+# X-Agent-Email/X-Agent-Id — see app/middleware/internal_auth.py. This replaces
+# the old unauthenticated POST /internal/conversations/{id}/resolve outright: that
+# endpoint was reachable over the public internet with zero auth (nginx.conf
+# proxies /internal/ on the same public HTTPS server block as /webhook), so anyone
+# who obtained/guessed a conversation_id could silently un-escalate it.
+app.include_router(internal_router.router)
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
-
-@app.post("/internal/conversations/{conversation_id}/resolve")
-async def resolve_conversation(conversation_id: str):
-    """The only path back from `escalated` to `jane_handling` — whoever is running
-    this rehearsal calls this once they've answered the customer's question
-    themselves (matching the design doc's escalation flow). Not authenticated yet —
-    this is an internal-only endpoint per docker-compose's nginx routing
-    (/internal/ is not exposed publicly the way /webhook is); real auth is a Step 5
-    concern once this moves beyond a single-operator rehearsal."""
-    if _client is None:
-        raise HTTPException(status_code=503, detail="Database not configured")
-
-    try:
-        object_id = ObjectId(conversation_id)
-    except InvalidId:
-        raise HTTPException(status_code=400, detail="Invalid conversation id")
-
-    db = _client[settings.MONGODB_DB]
-    updated = await conversation_service.resolve(db, object_id)
-    if updated is None:
-        raise HTTPException(status_code=404, detail="Conversation not found or not escalated")
-    return {"conversation_id": conversation_id, "state": updated["state"]}

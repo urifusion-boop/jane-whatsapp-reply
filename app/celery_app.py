@@ -41,30 +41,23 @@ celery_app.conf.update(
 
 @worker_process_init.connect
 def _init_worker_process(**kwargs):
-    """Ensure the idempotency-claim collection has a TTL index, once per worker
-    process — same discipline as whatsapp-agent's own startup hook."""
+    """Ensure all shared indexes exist, once per worker process — same discipline
+    as whatsapp-agent's own startup hook. See app/services/db_indexes.py — this is
+    ALSO called from main.py's FastAPI startup, since some of these indexes back
+    collections only the FastAPI process itself writes to."""
     import asyncio
 
     from motor.motor_asyncio import AsyncIOMotorClient
 
-    async def _ensure_index():
+    from app.services.db_indexes import ensure_indexes
+
+    async def _ensure():
         client = AsyncIOMotorClient(settings.MONGODB_URI)
         db = client[settings.MONGODB_DB]
-        # unique on message_id is what actually makes the idempotency claim work —
-        # insert_one() only raises DuplicateKeyError because of this index; the TTL
-        # index just cleans up old claims so the collection doesn't grow forever.
-        await db["jane_wa_processed_messages"].create_index("message_id", unique=True)
-        await db["jane_wa_processed_messages"].create_index("created_at", expireAfterSeconds=86400)
-        # Multi-tenant conversation scoping: without brand_id in the key, two
-        # different clients' customers could collide onto one conversation
-        # record now that this service handles more than one client's WhatsApp
-        # number. Safe to create before every existing doc has brand_id
-        # backfilled — phone_hash alone was already unique pre-migration, so
-        # there's nothing for the compound key to conflict on either way.
-        await db["jane_wa_conversations"].create_index([("phone_hash", 1), ("brand_id", 1)], unique=True)
+        await ensure_indexes(db)
         client.close()
 
     try:
-        asyncio.run(_ensure_index())
+        asyncio.run(_ensure())
     except Exception as e:
-        print(f"[celery_app] failed to ensure TTL index: {e}")
+        print(f"[celery_app] failed to ensure indexes: {e}")

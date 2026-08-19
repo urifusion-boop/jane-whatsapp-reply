@@ -4,8 +4,23 @@ Step 2 of the "Jane on WhatsApp" design doc: a FastAPI + Celery + Redis microser
 that answers customer questions on URI's own WhatsApp number, using the
 `operational_facts` a brand's Playbook carries (see `uri-social-backend`'s
 `BrandProfileService`). Deterministic, exact-match-only in v1 — never invents a price
-or policy; anything it can't answer from real facts gets escalated by email with a
-holding reply sent to the customer.
+or policy; anything it can't answer from real facts gets escalated with a holding
+reply sent to the customer.
+
+When Jane escalates, a customer-care agent can close it out via three channels, all
+landing back in the exact same WhatsApp chat thread (WhatsApp itself has no concept
+of separate chats for the same two phone numbers — it's purely keyed by the number
+pair, so it doesn't matter which channel replied):
+- **Dashboard** — `uri-social-frontend`'s Escalations tab, authenticated via the
+  same JWT/support-role login the rest of the admin area uses.
+- **Email** — the escalation notification includes a click-through deep link to the
+  dashboard (not raw inbound-email parsing).
+- **WhatsApp directly** — via Meta's "Coexistence" mode, a human can reply from the
+  actual WhatsApp Business phone app on the same number; Jane detects this via
+  Meta's message-echo webhook and auto-resolves. **The exact webhook schema for
+  this is unverified** — see `app/services/cloud_api_client.py`'s
+  `extract_message_echo()` docstring; it's a stub until confirmed against Meta's
+  live docs or a real captured payload.
 
 A separate project from `whatsapp-agent` on purpose — see the design doc's own
 Architecture section (§5) for why: a genuinely different numbering model, a genuinely
@@ -25,8 +40,23 @@ verification, `X-Hub-Signature-256`), not Twilio.
 Customer's WhatsApp → Meta Cloud API → nginx (3 webhook replicas)
   → fast-ack, verify signature, enqueue to Redis, return 200 immediately
   → Celery worker pool → reads operational_facts from shared MongoDB
-  → exact fact match: reply directly · no match: escalate (email + holding reply)
+  → exact fact match: reply directly · no match: escalate (holding reply + notify)
+
+uri-social-backend (support-team JWT auth) → /internal/* (shared-secret auth,
+see app/middleware/internal_auth.py) → agent reply sent via Cloud API, logged,
+conversation resolved — same chat thread the customer already sees.
 ```
+
+**Customer phone numbers**: originally stored only as a one-way hash (never
+recoverable) — but replying to an escalated conversation later, from a different
+process, requires the real number (Meta's send API always needs it; there's no
+session/thread-id shortcut). Now stored reversibly, once, per conversation, on its
+own encryption key (`PHONE_ENCRYPTION_KEY`, deliberately separate from
+`FIELD_ENCRYPTION_KEY`) — decrypt access is narrowed in code to exactly two call
+sites, never returned by any list/read API. `scripts/purge_stale_phone_numbers.py`
+(run via host crontab, not Celery Beat) clears it once a conversation's been
+inactive past a retention window, so it isn't kept decryptable indefinitely. See
+`app/services/crypto_utils.py`'s module docstring for the full reasoning.
 
 ## Local development
 
@@ -48,9 +78,8 @@ celery -A app.celery_app worker --loglevel=info -Q jane_wa_messages
 pytest tests/ -v
 ```
 
-23 tests, all against mocks (OpenAI, Mongo, Meta's HTTP API) — no live Meta
-credentials are required to run them. See "Not yet live-tested" below for what
-those credentials would additionally unlock.
+43 tests, all against mocks (OpenAI, Mongo, Meta's HTTP API) — no live Meta
+credentials are required to run them.
 
 **Also verified against real data, not just mocks**: URI Social's actual
 `operational_facts` (real Starter/Growth/Pro/Agency pricing, Squad as the payment
@@ -88,22 +117,28 @@ Settings → Secrets and variables → Actions), none of which exist yet for thi
 `.github/workflows/test.yml` runs on every push/PR that isn't `main` — compile check,
 full test suite, and `docker compose config` validation. No secrets required.
 
-## Not yet live-tested — blocked on Day-1 setup, not engineering
+## Status
 
-This service's own logic (signature verification, fact matching, conversation state
-machine, encryption) is fully built and unit-tested, and the fact-matching/reply
-logic has additionally been run against URI's real operational facts in the dev
-database (see above) — that part is done. What's still missing before this can
-handle a real WhatsApp message end-to-end:
+Live in production on a Meta **test number** (up on `20.81.41.135`, full enterprise
+stack: nginx + 3 webhook replicas + 3 workers + Redis + Flower) — confirmed handling
+real messages end-to-end. Moving to the real business number is a pure config swap
+(`WHATSAPP_PHONE_NUMBER_ID`, and `WHATSAPP_ACCESS_TOKEN` only if Meta issues a
+different one for it) — `send_message()`/`message_processor.py` already resolve the
+sending number dynamically per-message, no code change needed.
 
-- **WhatsApp product on the Meta App** — `META_APP_ID`/`META_APP_SECRET` are reused
-  from `uri-social-backend`'s existing Meta App; the WhatsApp Business Platform
-  product itself hasn't been added to it yet.
-- **A real phone number, access token, and a chosen verify token.**
-- **`FIELD_ENCRYPTION_KEY`** — generate with the command in `.env.example`.
-- **SMTP credentials + `ESCALATION_EMAIL_TO`** — for the escalation email.
-- **Production VM + the four GitHub secrets above.**
-
-None of these are engineering work — they're dashboard/account setup, one command,
-or a config value someone needs to decide. Once they exist, this deploys and runs
-exactly as built.
+**Still needed before the real number goes live for real customers:**
+- **Real business number registered on the Meta App**, either newly verified or
+  migrated from wherever it's currently live (Twilio, another BSP) — a Meta-dashboard
+  action, not engineering.
+- **WhatsApp Coexistence enabled** on that number, so a human can also reply from
+  the WhatsApp Business phone app directly (see the three-channel escalation-reply
+  section above) — also a Meta-dashboard action.
+- **`PHONE_ENCRYPTION_KEY` and `JANE_WA_INTERNAL_SECRET`** — generate with the
+  commands in `.env.example`; must be set on both this service AND (the secret only)
+  `uri-social-backend`'s own config, exactly matching.
+- **`FRONTEND_BASE_URL`** — so the escalation email's dashboard link resolves.
+- **`scripts/purge_stale_phone_numbers.py` on a crontab** — see the script's own
+  docstring for the suggested schedule.
+- **Meta's message-echo webhook schema confirmed** — `extract_message_echo()` is a
+  stub until this happens; the WhatsApp-phone-app reply channel won't auto-resolve
+  conversations until it's implemented for real against a verified payload shape.
