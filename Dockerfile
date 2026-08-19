@@ -33,6 +33,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /usr/local /usr/local
 COPY --from=build /app/app /app/app
 
+RUN curl -fsSL -o /app/global-bundle.pem \
+    https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+
 # Expose port
 EXPOSE 8080
 
